@@ -1,0 +1,73 @@
+name: "[sttts] Build and Push Images"
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # This will be ghcr.io/<owner>/kro
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install ko
+        uses: ko-build/setup-ko@v0.9
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            # Use the tag name for releases
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            # Use date + short SHA for branch builds
+            TAG="$(date +v%Y%m%d)-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Using tag: ${TAG}"
+
+      - name: Build and push controller image
+        env:
+          KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/kro
+        run: |
+          ko build --bare github.com/kubernetes-sigs/kro/cmd/controller \
+            --tags "${{ steps.tag.outputs.tag }}" \
+            --tags "latest" \
+            --sbom=none
+
+      - name: Build and push Helm chart (on tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          HELM_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/kro/charts
+        run: |
+          RELEASE_VERSION="${{ steps.tag.outputs.tag }}" make package-helm
+          RELEASE_VERSION="${{ steps.tag.outputs.tag }}" HELM_IMAGE="${HELM_IMAGE}" make publish-helm
+
